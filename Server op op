@@ -1,0 +1,685 @@
+--[[
+    Server Hopper - Unified Script (Theme + Image)
+]]
+
+print("[Hopper] Script started")
+
+local ok, err = pcall(function()
+    local Players          = game:GetService("Players")
+    local TeleportService  = game:GetService("TeleportService")
+    local HttpService      = game:GetService("HttpService")
+    local UserInputService = game:GetService("UserInputService")
+    local TweenService     = game:GetService("TweenService")
+    local CoreGui          = game:GetService("CoreGui")
+    local Lighting         = game:GetService("Lighting")
+
+    local player  = Players.LocalPlayer
+    local placeId = game.PlaceId
+
+    -- === HTTP ===
+    local function getRequestFunction()
+        return (syn and syn.request) or (http and http.request)
+            or (fluxus and fluxus.request) or http_request or request
+    end
+    local requestFunc = getRequestFunction()
+    if not requestFunc then
+        error("Инжектор не поддерживает HTTP-запросы")
+    end
+
+    local now
+    if os and os.clock then now = os.clock
+    elseif tick then now = tick
+    else now = function() return os.time() end end
+
+    -- === КЭШ ===
+    local cachedServers = {}
+    local cacheTime = 0
+    local CACHE_DURATION = 60
+
+    local function fetchServers(ignoreCache)
+        if not ignoreCache and #cachedServers > 0
+            and (now() - cacheTime) < CACHE_DURATION then
+            return cachedServers, true
+        end
+
+        local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true"):format(placeId)
+        print("[Hopper] Requesting (primary):", url)
+        local ok1, response = pcall(requestFunc, {Url = url, Method = "GET"})
+
+        if not ok1 or not response or not response.Body or (response.StatusCode and response.StatusCode ~= 200) then
+            warn("[Hopper] Primary failed, trying proxy...")
+            local proxyUrl = ("https://games.roproxy.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true"):format(placeId)
+            ok1, response = pcall(requestFunc, {Url = proxyUrl, Method = "GET"})
+        end
+
+        if not ok1 or not response or not response.Body then
+            warn("[Hopper] All requests failed.")
+            return cachedServers, false
+        end
+
+        local ok2, data = pcall(function()
+            return HttpService:JSONDecode(response.Body)
+        end)
+        if not ok2 or type(data) ~= "table" or type(data.data) ~= "table" then
+            warn("[Hopper] JSON decode failed.")
+            return cachedServers, false
+        end
+
+        local servers = {}
+        for _, server in ipairs(data.data) do
+            if server.id ~= game.JobId and tonumber(server.playing) < tonumber(server.maxPlayers) then
+                table.insert(servers, {
+                    id = server.id,
+                    playing = tonumber(server.playing),
+                    maxPlayers = tonumber(server.maxPlayers),
+                })
+            end
+        end
+        table.sort(servers, function(a, b) return a.playing < b.playing end)
+        cachedServers = servers
+        cacheTime = now()
+        print("[Hopper] Fetched servers:", #servers)
+        return servers, true
+    end
+
+    -- === GUI PARENT ===
+    local function getGuiParent()
+        if gethui then
+            local okG, h = pcall(gethui)
+            if okG and h then return h end
+        end
+        return CoreGui
+    end
+
+    local guiParent = getGuiParent()
+    pcall(function()
+        local old = guiParent:FindFirstChild("ServerHopperGui")
+        if old then old:Destroy() end
+    end)
+
+    -- === BLUR + ЦВЕТ ===
+    local BLUR_NAME = "ServerHopperBlur"
+    local CC_NAME   = "ServerHopperCC"
+    local BLUR_EXPANDED = 18
+    local CC_BRIGHT_EXPANDED = -0.18
+
+    pcall(function()
+        local oldBlur = Lighting:FindFirstChild(BLUR_NAME)
+        if oldBlur then oldBlur:Destroy() end
+        local oldCC = Lighting:FindFirstChild(CC_NAME)
+        if oldCC then oldCC:Destroy() end
+    end)
+
+    local blur = Instance.new("BlurEffect")
+    blur.Name = BLUR_NAME
+    blur.Size = BLUR_EXPANDED
+    blur.Parent = Lighting
+
+    local colorCorrection = Instance.new("ColorCorrectionEffect")
+    colorCorrection.Name = CC_NAME
+    colorCorrection.Brightness = CC_BRIGHT_EXPANDED
+    colorCorrection.Contrast   = 0.06
+    colorCorrection.Saturation = -0.1
+    colorCorrection.Parent = Lighting
+
+    -- === КОНСТАНТЫ ===
+    local WIDTH_EXPANDED  = 720
+    local WIDTH_COLLAPSED = 360
+    local HEIGHT_EXPANDED = 460
+    local TITLE_H         = 40
+    local ROW_H, ROW_PAD, MAX_ROWS = 54, 7, 20
+
+    -- Твоё изображение
+    local BG_IMAGE_ID = "rbxassetid://124349171744795"
+
+    -- Палитра
+    local C_BG          = Color3.fromRGB(14, 14, 17)
+    local C_TITLE_TOP   = Color3.fromRGB(34, 34, 42)
+    local C_TITLE_MID   = Color3.fromRGB(20, 20, 25)
+    local C_TEXT        = Color3.fromRGB(248, 248, 252)
+    local C_TEXT_DIM    = Color3.fromRGB(150, 150, 165)
+    local C_ROW_BG      = Color3.fromRGB(20, 20, 26)
+    local C_ROW_BG_HOV  = Color3.fromRGB(42, 42, 52)
+    local C_ROW_BORDER  = Color3.fromRGB(65, 65, 78)
+    local C_WHITE       = Color3.fromRGB(255, 255, 255)
+    local C_ACCENT      = Color3.fromRGB(90, 155, 240)
+    local C_BTN_DARK    = Color3.fromRGB(28, 28, 36)
+    local C_BTN_DARK_H  = Color3.fromRGB(48, 48, 60)
+    local C_BTN_WHITE   = Color3.fromRGB(240, 240, 245)
+    local C_BTN_WHITE_H = Color3.fromRGB(255, 255, 255)
+
+    -- === GUI ===
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "ServerHopperGui"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = guiParent
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.AnchorPoint = Vector2.new(0.5, 0)
+    mainFrame.Position = UDim2.new(0.5, 0, 0.40, 0)
+    mainFrame.Size = UDim2.new(0, WIDTH_EXPANDED, 0, HEIGHT_EXPANDED)
+    mainFrame.BackgroundColor3 = C_BG
+    mainFrame.BorderSizePixel = 0
+    mainFrame.ClipsDescendants = true
+    mainFrame.Parent = screenGui
+    Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 16)
+
+    local outline = Instance.new("UIStroke")
+    outline.Color = Color3.fromRGB(80, 80, 92)
+    outline.Thickness = 2
+    outline.Transparency = 0.4
+    outline.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    outline.Parent = mainFrame
+
+    -- === ШАПКА ===
+    local titleBar = Instance.new("Frame")
+    titleBar.Size = UDim2.new(1, 0, 0, TITLE_H)
+    titleBar.BackgroundColor3 = C_TITLE_MID
+    titleBar.BorderSizePixel = 0
+    titleBar.Active = true
+    titleBar.ZIndex = 10
+    titleBar.Parent = mainFrame
+    Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 16)
+
+    local titleGrad = Instance.new("UIGradient")
+    titleGrad.Color = ColorSequence.new{
+        ColorSequenceKeypoint.new(0,   C_TITLE_TOP),
+        ColorSequenceKeypoint.new(0.5, C_TITLE_MID),
+        ColorSequenceKeypoint.new(1,   C_TITLE_TOP),
+    }
+    titleGrad.Parent = titleBar
+
+    local titleCornerFix = Instance.new("Frame")
+    titleCornerFix.Size = UDim2.new(1, 0, 0, 16)
+    titleCornerFix.Position = UDim2.new(0, 0, 1, -16)
+    titleCornerFix.BackgroundColor3 = C_TITLE_MID
+    titleCornerFix.BorderSizePixel = 0
+    titleCornerFix.ZIndex = 11
+    titleCornerFix.Parent = titleBar
+    local cornerGrad = titleGrad:Clone()
+    cornerGrad.Parent = titleCornerFix
+
+    local accent = Instance.new("Frame")
+    accent.Size = UDim2.new(1, 0, 0, 2)
+    accent.Position = UDim2.new(0, 0, 1, -2)
+    accent.BorderSizePixel = 0
+    accent.ZIndex = 12
+    accent.Parent = titleBar
+
+    local accentGrad = Instance.new("UIGradient")
+    accentGrad.Color = ColorSequence.new{
+        ColorSequenceKeypoint.new(0,   C_ACCENT),
+        ColorSequenceKeypoint.new(0.5, C_WHITE),
+        ColorSequenceKeypoint.new(1,   C_ACCENT),
+    }
+    accentGrad.Parent = accent
+
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.Size = UDim2.new(1, 0, 1, 0)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Text = "Server Hopper"
+    titleLabel.TextColor3 = C_TEXT
+    titleLabel.Font = Enum.Font.GothamBold
+    titleLabel.TextSize = 17
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Center
+    titleLabel.RichText = true
+    titleLabel.Active = false
+    titleLabel.ZIndex = 13
+    titleLabel.Parent = titleBar
+
+    local dragHandle = Instance.new("TextButton")
+    dragHandle.Size = UDim2.new(1, 0, 1, 0)
+    dragHandle.BackgroundTransparency = 1
+    dragHandle.Text = ""
+    dragHandle.AutoButtonColor = false
+    dragHandle.ZIndex = 14
+    dragHandle.Parent = titleBar
+
+    -- === КОНТЕНТ ===
+    local contentFrame = Instance.new("Frame")
+    contentFrame.Size = UDim2.new(1, 0, 0, HEIGHT_EXPANDED - TITLE_H)
+    contentFrame.Position = UDim2.new(0, 0, 0, TITLE_H)
+    contentFrame.BackgroundTransparency = 1
+    contentFrame.ClipsDescendants = true
+    contentFrame.Parent = mainFrame
+
+    -- Фоновое изображение
+    local bgImage = Instance.new("ImageLabel")
+    bgImage.Name = "BackgroundImage"
+    bgImage.Size = UDim2.new(1, 0, 1, 0)
+    bgImage.Position = UDim2.new(0, 0, 0, 0)
+    bgImage.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    bgImage.BorderSizePixel = 0
+    bgImage.Image = BG_IMAGE_ID
+    bgImage.ScaleType = Enum.ScaleType.Crop
+    bgImage.ZIndex = 1
+    bgImage.Parent = contentFrame
+
+    -- Затемняющий overlay, чтобы текст был читаемым
+    local bgOverlay = Instance.new("Frame")
+    bgOverlay.Size = UDim2.new(1, 0, 1, 0)
+    bgOverlay.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
+    bgOverlay.BackgroundTransparency = 0.28
+    bgOverlay.BorderSizePixel = 0
+    bgOverlay.ZIndex = 2
+    bgOverlay.Parent = contentFrame
+
+    -- Градиент overlay (сверху и снизу темнее)
+    local overlayGrad = Instance.new("UIGradient")
+    overlayGrad.Rotation = 90
+    overlayGrad.Color = ColorSequence.new{
+        ColorSequenceKeypoint.new(0,   Color3.fromRGB(0, 0, 0)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(20, 20, 25)),
+        ColorSequenceKeypoint.new(1,   Color3.fromRGB(0, 0, 0)),
+    }
+    overlayGrad.Transparency = NumberSequence.new{
+        NumberSequenceKeypoint.new(0,   0.1),
+        NumberSequenceKeypoint.new(0.5, 0.55),
+        NumberSequenceKeypoint.new(1,   0.1),
+    }
+    overlayGrad.Parent = bgOverlay
+
+    -- Верхняя панель (статус + Refresh)
+    local topBar = Instance.new("Frame")
+    topBar.Size = UDim2.new(1, -24, 0, 46)
+    topBar.Position = UDim2.new(0, 12, 0, 8)
+    topBar.BackgroundTransparency = 1
+    topBar.ZIndex = 5
+    topBar.Parent = contentFrame
+
+    local statusLabel = Instance.new("TextLabel")
+    statusLabel.Size = UDim2.new(1, -160, 1, 0)
+    statusLabel.Position = UDim2.new(0, 4, 0, 0)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.TextColor3 = C_TEXT_DIM
+    statusLabel.Font = Enum.Font.Gotham
+    statusLabel.TextSize = 14
+    statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    statusLabel.Text = "Loading..."
+    statusLabel.ZIndex = 6
+    statusLabel.Parent = topBar
+
+    local refreshBtn = Instance.new("TextButton")
+    refreshBtn.Size = UDim2.new(0, 150, 0, 40)
+    refreshBtn.Position = UDim2.new(1, -150, 0.5, -20)
+    refreshBtn.BackgroundColor3 = C_BTN_DARK
+    refreshBtn.TextColor3 = C_TEXT
+    refreshBtn.Text = "⟳  Refresh"
+    refreshBtn.TextSize = 14
+    refreshBtn.Font = Enum.Font.GothamBold
+    refreshBtn.AutoButtonColor = false
+    refreshBtn.ZIndex = 6
+    refreshBtn.Parent = topBar
+    Instance.new("UICorner", refreshBtn).CornerRadius = UDim.new(0, 10)
+
+    local refreshStroke = Instance.new("UIStroke")
+    refreshStroke.Color = C_WHITE
+    refreshStroke.Thickness = 1
+    refreshStroke.Transparency = 0.55
+    refreshStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    refreshStroke.Parent = refreshBtn
+
+    -- Внутренний блик сверху (эффект стекла)
+    local refreshShine = Instance.new("Frame")
+    refreshShine.Size = UDim2.new(1, -8, 0, 1)
+    refreshShine.Position = UDim2.new(0, 4, 0, 1)
+    refreshShine.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    refreshShine.BackgroundTransparency = 0.75
+    refreshShine.BorderSizePixel = 0
+    refreshShine.ZIndex = 7
+    refreshShine.Parent = refreshBtn
+
+    -- Список
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, -24, 1, -64)
+    scroll.Position = UDim2.new(0, 12, 0, 60)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 6
+    scroll.ScrollBarImageColor3 = Color3.fromRGB(140, 140, 155)
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.ZIndex = 5
+    scroll.Parent = contentFrame
+
+    local listLayout = Instance.new("UIListLayout")
+    listLayout.Padding = UDim.new(0, ROW_PAD)
+    listLayout.Parent = scroll
+
+    -- === FADE-IN ===
+    mainFrame.BackgroundTransparency = 1
+    titleBar.BackgroundTransparency = 1
+    titleCornerFix.BackgroundTransparency = 1
+    pcall(function()
+        TweenService:Create(mainFrame,     TweenInfo.new(0.3), {BackgroundTransparency = 0}):Play()
+        TweenService:Create(titleBar,      TweenInfo.new(0.3), {BackgroundTransparency = 0}):Play()
+        TweenService:Create(titleCornerFix,TweenInfo.new(0.3), {BackgroundTransparency = 0}):Play()
+    end)
+
+    -- === СТИЛИЗАЦИЯ ===
+    local function applyCollapsedStyle(isCollapsed)
+        if isCollapsed then
+            titleLabel.Text = '<font color="#FFFFFF">●</font>   <b>OP SERVER</b>'
+            accent.Visible = false
+            bgImage.Visible = false
+            bgOverlay.Visible = false
+        else
+            titleLabel.Text = '<font color="#FFFFFF">●</font>  Server Hopper'
+            accent.Visible = true
+            bgImage.Visible = true
+            bgOverlay.Visible = true
+        end
+    end
+
+    applyCollapsedStyle(false)
+
+    -- === СВЕРНУТЬ / РАЗВЕРНУТЬ ===
+    local minimized = false
+    local animating = false
+    local tweenInfo = TweenInfo.new(0.35, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+
+    local function toggleMinimize()
+        if animating then return end
+        animating = true
+        minimized = not minimized
+
+        local targetSize = minimized
+            and UDim2.new(0, WIDTH_COLLAPSED,  0, TITLE_H)
+            or  UDim2.new(0, WIDTH_EXPANDED,   0, HEIGHT_EXPANDED)
+        local targetBlur  = minimized and 0 or BLUR_EXPANDED
+        local targetBrigh = minimized and 0 or CC_BRIGHT_EXPANDED
+
+        applyCollapsedStyle(minimized)
+
+        local tweenSize   = TweenService:Create(mainFrame, tweenInfo, {Size = targetSize})
+        local tweenBlur   = TweenService:Create(blur, tweenInfo, {Size = targetBlur})
+        local tweenBright = TweenService:Create(colorCorrection, tweenInfo, {Brightness = targetBrigh})
+
+        tweenSize.Completed:Connect(function() animating = false end)
+        tweenSize:Play()
+        tweenBlur:Play()
+        tweenBright:Play()
+    end
+
+    -- === ПЕРЕТАСКИВАНИЕ + КЛИК ===
+    local dragging, dragMoved = false, false
+    local dragStart, startPos
+
+    dragHandle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging  = true
+            dragMoved = false
+            dragStart = input.Position
+            startPos  = mainFrame.Position
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch then
+            local d = input.Position - dragStart
+            if math.abs(d.X) > 10 or math.abs(d.Y) > 10 then dragMoved = true end
+            mainFrame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + d.X,
+                startPos.Y.Scale, startPos.Y.Offset + d.Y
+            )
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            if dragging and not dragMoved then toggleMinimize() end
+            dragging, dragMoved = false, false
+        end
+    end)
+
+    -- === HOVER ОКНА ===
+    dragHandle.MouseEnter:Connect(function()
+        pcall(function()
+            TweenService:Create(outline, TweenInfo.new(0.24), {
+                Transparency = 0.05,
+                Color = Color3.fromRGB(220, 220, 235),
+            }):Play()
+        end)
+    end)
+    dragHandle.MouseLeave:Connect(function()
+        pcall(function()
+            TweenService:Create(outline, TweenInfo.new(0.24), {
+                Transparency = 0.4,
+                Color = Color3.fromRGB(80, 80, 92),
+            }):Play()
+        end)
+    end)
+
+    -- === HOVER REFRESH ===
+    refreshBtn.MouseEnter:Connect(function()
+        if refreshBtn.Active then
+            TweenService:Create(refreshBtn, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {BackgroundColor3 = C_BTN_DARK_H}):Play()
+            TweenService:Create(refreshStroke, TweenInfo.new(0.2), {Transparency = 0.15}):Play()
+        end
+    end)
+    refreshBtn.MouseLeave:Connect(function()
+        if refreshBtn.Active then
+            TweenService:Create(refreshBtn, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {BackgroundColor3 = C_BTN_DARK}):Play()
+            TweenService:Create(refreshStroke, TweenInfo.new(0.2), {Transparency = 0.55}):Play()
+        end
+    end)
+
+    -- === СТРОКИ ===
+    local rows = {}
+
+    local function createRow()
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1, -10, 0, ROW_H)
+        row.BackgroundColor3 = C_ROW_BG
+        row.BackgroundTransparency = 0.05
+        row.BorderSizePixel = 0
+        row.Visible = false
+        row.ZIndex = 6
+        row.Parent = scroll
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 12)
+
+        local glowStroke = Instance.new("UIStroke")
+        glowStroke.Color = C_ROW_BORDER
+        glowStroke.Thickness = 1
+        glowStroke.Transparency = 0.5
+        glowStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        glowStroke.Parent = row
+
+        local dot = Instance.new("Frame")
+        dot.Size = UDim2.new(0, 14, 0, 14)
+        dot.Position = UDim2.new(0, 18, 0.5, -7)
+        dot.BorderSizePixel = 0
+        dot.BackgroundColor3 = Color3.fromRGB(120, 120, 130)
+        dot.ZIndex = 7
+        dot.Parent = row
+        Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+
+        local info = Instance.new("TextLabel")
+        info.Size = UDim2.new(1, -175, 1, 0)
+        info.Position = UDim2.new(0, 42, 0, 0)
+        info.BackgroundTransparency = 1
+        info.TextColor3 = C_TEXT
+        info.Font = Enum.Font.GothamBold
+        info.TextSize = 16
+        info.TextXAlignment = Enum.TextXAlignment.Left
+        info.ZIndex = 7
+        info.Parent = row
+
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(0, 120, 0, 38)
+        btn.Position = UDim2.new(1, -130, 0.5, -19)
+        btn.BackgroundColor3 = C_BTN_WHITE
+        btn.TextColor3 = Color3.fromRGB(15, 15, 20)
+        btn.Font = Enum.Font.GothamBold
+        btn.TextSize = 15
+        btn.Text = "Join"
+        btn.AutoButtonColor = false
+        btn.ZIndex = 8
+        btn.Parent = row
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 10)
+
+        -- Мягкая тень-обводка кнопки Join
+        local joinStroke = Instance.new("UIStroke")
+        joinStroke.Color = C_WHITE
+        joinStroke.Thickness = 1
+        joinStroke.Transparency = 0.7
+        joinStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        joinStroke.Parent = btn
+
+        -- DeepGlow при hover
+        local hoverToken = 0
+        local function setGlow(on)
+            hoverToken = hoverToken + 1
+            local myToken = hoverToken
+            if on then
+                TweenService:Create(glowStroke, TweenInfo.new(0.25, Enum.EasingStyle.Quad), {
+                    Thickness    = 6,
+                    Transparency = 0.35,
+                    Color        = C_WHITE,
+                }):Play()
+                TweenService:Create(row, TweenInfo.new(0.25), {BackgroundColor3 = C_ROW_BG_HOV, BackgroundTransparency = 0}):Play()
+            else
+                task.delay(0.06, function()
+                    if hoverToken ~= myToken then return end
+                    TweenService:Create(glowStroke, TweenInfo.new(0.32, Enum.EasingStyle.Quad), {
+                        Thickness    = 1,
+                        Transparency = 0.5,
+                        Color        = C_ROW_BORDER,
+                    }):Play()
+                    TweenService:Create(row, TweenInfo.new(0.32), {BackgroundColor3 = C_ROW_BG, BackgroundTransparency = 0.05}):Play()
+                end)
+            end
+        end
+
+        row.MouseEnter:Connect(function() setGlow(true) end)
+        row.MouseLeave:Connect(function() setGlow(false) end)
+        btn.MouseEnter:Connect(function() setGlow(true) end)
+        btn.MouseLeave:Connect(function() setGlow(false) end)
+
+        btn.MouseEnter:Connect(function()
+            if btn.Active then
+                TweenService:Create(btn, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {BackgroundColor3 = C_BTN_WHITE_H}):Play()
+                TweenService:Create(joinStroke, TweenInfo.new(0.2), {Transparency = 0.3}):Play()
+            end
+        end)
+        btn.MouseLeave:Connect(function()
+            if btn.Active then
+                TweenService:Create(btn, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {BackgroundColor3 = C_BTN_WHITE}):Play()
+                TweenService:Create(joinStroke, TweenInfo.new(0.2), {Transparency = 0.7}):Play()
+            end
+        end)
+
+        local data = {frame = row, dot = dot, info = info, btn = btn, jobId = nil}
+
+        btn.MouseButton1Click:Connect(function()
+            if not data.jobId then return end
+            local job = data.jobId
+            data.btn.Text   = "..."
+            data.btn.Active = false
+            local okT, errT = pcall(function()
+                TeleportService:TeleportToPlaceInstance(placeId, job, player)
+            end)
+            if not okT then
+                warn("[Hopper] teleport error: " .. tostring(errT))
+                data.btn.Text = "Error"
+                task.wait(1.5)
+                data.btn.Text   = "Join"
+                data.btn.Active = true
+            end
+        end)
+
+        return data
+    end
+
+    local function updateRow(index, server)
+        local data = rows[index] or createRow()
+        rows[index] = data
+        data.frame.Visible = true
+        data.jobId = server.id
+
+        local ratio = server.playing / math.max(server.maxPlayers, 1)
+        local color
+        if ratio < 0.25 then color = Color3.fromRGB(110, 200, 130)
+        elseif ratio < 0.6 then color = Color3.fromRGB(220, 180, 80)
+        else color = Color3.fromRGB(200, 100, 100) end
+
+        data.dot.BackgroundColor3 = color
+        data.info.Text = ("%d / %d players"):format(server.playing, server.maxPlayers)
+        data.btn.Text = "Join"
+        data.btn.Active = true
+        data.btn.BackgroundColor3 = C_BTN_WHITE
+    end
+
+    local function renderList(servers)
+        local count = math.min(#servers, MAX_ROWS)
+        for i = 1, count do
+            updateRow(i, servers[i])
+        end
+        for i = count + 1, #rows do
+            if rows[i] then rows[i].frame.Visible = false end
+        end
+        local canvasY = count * ROW_H + math.max(0, count - 1) * ROW_PAD + 6
+        scroll.CanvasSize = UDim2.new(0, 0, 0, canvasY)
+    end
+
+    -- === ЗАГРУЗКА ===
+    local loading = false
+
+    local function loadServers(force)
+        if loading then return end
+        loading = true
+
+        refreshBtn.Active = false
+        refreshBtn.Text = "Loading…"
+        refreshBtn.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
+        refreshBtn.TextColor3 = C_TEXT_DIM
+        refreshStroke.Transparency = 0.8
+        refreshShine.BackgroundTransparency = 0.92
+
+        if #cachedServers > 0 then
+            renderList(cachedServers)
+            statusLabel.Text = ("Servers: %d • cached"):format(#cachedServers)
+        else
+            statusLabel.Text = "Loading..."
+        end
+
+        task.spawn(function()
+            task.wait()
+            local servers, fresh = fetchServers(force)
+            loading = false
+
+            refreshBtn.Active = true
+            refreshBtn.Text = "⟳  Refresh"
+            refreshBtn.BackgroundColor3 = C_BTN_DARK
+            refreshBtn.TextColor3 = C_TEXT
+            refreshStroke.Transparency = 0.55
+            refreshShine.BackgroundTransparency = 0.75
+
+            if #servers > 0 then
+                renderList(servers)
+                statusLabel.Text = fresh
+                    and ("Servers: %d"):format(#servers)
+                    or  ("Servers: %d • cached"):format(#servers)
+            elseif #cachedServers == 0 then
+                statusLabel.Text = "Failed to load servers"
+            end
+        end)
+    end
+
+    refreshBtn.MouseButton1Click:Connect(function()
+        loadServers(true)
+    end)
+
+    loadServers(false)
+    print("[Hopper] GUI ready")
+end)
+
+if ok then
+    print("[Hopper] Script loaded successfully")
+else
+    warn("[Hopper] FAILED: " .. tostring(err))
+
+end
